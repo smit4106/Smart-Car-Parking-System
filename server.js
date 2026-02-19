@@ -14,7 +14,7 @@ mongoose.connect(
 .catch(err => console.log(err));
 
 
-// ---------------- UPDATED SCHEMA ----------------
+// ---------------- UPDATED SCHEMA (created_at removed) ----------------
 const parkingSchema = new mongoose.Schema({
 
   slot: {
@@ -40,11 +40,6 @@ const parkingSchema = new mongoose.Schema({
   charge_rupees: {
     type: Number,
     required: true
-  },
-
-  created_at: {
-    type: Date,
-    default: Date.now
   }
 
 });
@@ -59,11 +54,9 @@ app.post("/log", async (req, res) => {
 
     const { slot, entry_time, exit_time, duration_sec, charge } = req.body;
 
-    // Convert to proper Date format
     const entryDate = new Date(entry_time);
     const exitDate = new Date(exit_time);
 
-    // If ESP32 doesn't send charge, calculate ₹1/sec
     const calculatedCharge = charge ? charge : duration_sec;
 
     const newLog = new Parking({
