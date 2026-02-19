@@ -1,275 +1,291 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <Wire.h>
-#include <LiquidCrystal_I2C.h>
+#include <LiquidCrystal_PCF8574.h>
+#include <ESP32Servo.h>
 #include "time.h"
 
 // ---------------- WIFI ----------------
 const char* ssid = "Galaxy M34 5G";
 const char* password = "04012026";
 
-// ---------------- RENDER SERVER ----------------
 const char* serverURL = "https://smart-car-parking-system-0f2w.onrender.com/log";
 
-// ---------------- NTP ----------------
+// ---------------- NTP TIME ----------------
 const char* ntpServer = "pool.ntp.org";
-const long gmtOffset_sec = 19800;
-const int daylightOffset_sec = 0;
+const long  gmtOffset_sec = 19800;
+const int   daylightOffset_sec = 0;
 
-// ---------------- LCD ----------------
-LiquidCrystal_I2C lcd(0x27, 16, 2);
+// ---------------- I2C BUSES ----------------
+TwoWire I2C_Entry = TwoWire(0);
+TwoWire I2C_Exit  = TwoWire(1);
 
-// ---------------- ULTRASONIC ----------------
-#define TRIG_PIN_1 5
-#define ECHO_PIN_1 18
-#define TRIG_PIN_2 19
-#define ECHO_PIN_2 21
-#define TRIG_PIN_3 22
-#define ECHO_PIN_3 23
+LiquidCrystal_PCF8574 entryLcd(0x27);
+LiquidCrystal_PCF8574 exitLcd(0x27);
 
-const int threshold = 10;
-const int confirmCount = 2;
+// ---------------- SERVOS ----------------
+Servo entryServo;
+Servo exitServo;
 
-int slot1Count = 0, slot2Count = 0, slot3Count = 0;
-bool slot1Occupied = false;
-bool slot2Occupied = false;
-bool slot3Occupied = false;
+#define ENTRY_SERVO_PIN 13
+#define EXIT_SERVO_PIN 12
 
-bool previousSlot1State = false;
-bool previousSlot2State = false;
-bool previousSlot3State = false;
+// ---------------- SLOT SENSORS ----------------
+#define TRIG1 5
+#define ECHO1 18
+#define TRIG2 19
+#define ECHO2 21
+#define TRIG3 22
+#define ECHO3 23
 
-unsigned long entryMillis1 = 0;
-unsigned long entryMillis2 = 0;
-unsigned long entryMillis3 = 0;
+// ---------------- GATE SENSORS ----------------
+#define ENTRY_TRIG 32
+#define ENTRY_ECHO 33
+#define EXIT_TRIG 4
+#define EXIT_ECHO 2
 
-// ---------------- SETUP ----------------
+const int slotThreshold = 10;
+const int gateThreshold = 15;
+
+bool slot1=false, slot2=false, slot3=false;
+bool prev1=false, prev2=false, prev3=false;
+
+unsigned long entryTime1=0, entryTime2=0, entryTime3=0;
+
+int lastExitedSlot = 0;
+unsigned long lastDuration = 0;
+unsigned long lastCharge = 0;
+
 void setup() {
 
   Serial.begin(115200);
 
-  pinMode(TRIG_PIN_1, OUTPUT);
-  pinMode(ECHO_PIN_1, INPUT);
-  pinMode(TRIG_PIN_2, OUTPUT);
-  pinMode(ECHO_PIN_2, INPUT);
-  pinMode(TRIG_PIN_3, OUTPUT);
-  pinMode(ECHO_PIN_3, INPUT);
+  pinMode(TRIG1, OUTPUT); pinMode(ECHO1, INPUT);
+  pinMode(TRIG2, OUTPUT); pinMode(ECHO2, INPUT);
+  pinMode(TRIG3, OUTPUT); pinMode(ECHO3, INPUT);
+  pinMode(ENTRY_TRIG, OUTPUT); pinMode(ENTRY_ECHO, INPUT);
+  pinMode(EXIT_TRIG, OUTPUT);  pinMode(EXIT_ECHO, INPUT);
 
-  Wire.begin(25, 26);
-  lcd.init();
-  lcd.backlight();
+  entryServo.attach(ENTRY_SERVO_PIN);
+  exitServo.attach(EXIT_SERVO_PIN);
 
-  lcd.print("Connecting WiFi");
+  entryServo.write(0);
+  exitServo.write(0);
 
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
+  I2C_Entry.begin(25, 26);
+  I2C_Exit.begin(27, 14);
 
-  lcd.clear();
-  lcd.print("WiFi Connected");
-  Serial.println("WiFi Connected");
+  entryLcd.begin(20,4,I2C_Entry);
+  exitLcd.begin(16,2,I2C_Exit);
+
+  entryLcd.setBacklight(255);
+  exitLcd.setBacklight(255);
+
+  WiFi.begin(ssid,password);
+  while(WiFi.status()!=WL_CONNECTED) delay(500);
 
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-
-  // 🔥 WAIT FOR REAL TIME SYNC
-  struct tm timeinfo;
-  while (!getLocalTime(&timeinfo)) {
-    Serial.println("Waiting for NTP time...");
-    delay(1000);
-  }
-  Serial.println("Time synchronized!");
-
-  delay(1500);
-  lcd.clear();
 }
 
-// ---------------- LOOP ----------------
 void loop() {
 
-  int d1 = getDistance(TRIG_PIN_1, ECHO_PIN_1);
-  delay(50);
-  int d2 = getDistance(TRIG_PIN_2, ECHO_PIN_2);
-  delay(50);
-  int d3 = getDistance(TRIG_PIN_3, ECHO_PIN_3);
-
-  Serial.print("D1: "); Serial.print(d1);
-  Serial.print("  D2: "); Serial.print(d2);
-  Serial.print("  D3: "); Serial.println(d3);
-
-  updateSlot(d1, slot1Count, slot1Occupied);
-  updateSlot(d2, slot2Count, slot2Occupied);
-  updateSlot(d3, slot3Count, slot3Occupied);
-
-  // -------- SLOT 1 --------
-  if (slot1Occupied && !previousSlot1State) {
-    entryMillis1 = millis();
-    Serial.println("Vehicle Entered Slot 1");
-  }
-
-  if (!slot1Occupied && previousSlot1State) {
-    unsigned long duration = (millis() - entryMillis1) / 1000;
-    Serial.println("Vehicle Exited Slot 1");
-    sendToServer(1, getTimeFromMillis(entryMillis1), getCurrentTime(), duration);
-  }
-
-  // -------- SLOT 2 --------
-  if (slot2Occupied && !previousSlot2State) {
-    entryMillis2 = millis();
-    Serial.println("Vehicle Entered Slot 2");
-  }
-
-  if (!slot2Occupied && previousSlot2State) {
-    unsigned long duration = (millis() - entryMillis2) / 1000;
-    Serial.println("Vehicle Exited Slot 2");
-    sendToServer(2, getTimeFromMillis(entryMillis2), getCurrentTime(), duration);
-  }
-
-  // -------- SLOT 3 --------
-  if (slot3Occupied && !previousSlot3State) {
-    entryMillis3 = millis();
-    Serial.println("Vehicle Entered Slot 3");
-  }
-
-  if (!slot3Occupied && previousSlot3State) {
-    unsigned long duration = (millis() - entryMillis3) / 1000;
-    Serial.println("Vehicle Exited Slot 3");
-    sendToServer(3, getTimeFromMillis(entryMillis3), getCurrentTime(), duration);
-  }
-
-  previousSlot1State = slot1Occupied;
-  previousSlot2State = slot2Occupied;
-  previousSlot3State = slot3Occupied;
-
-  displayLCD();
+  handleEntryGate();
+  updateSlots();
+  handleExitGate();
+  displayEntryLCD();
 
   delay(300);
 }
 
-// ---------------- ULTRASONIC ----------------
-int getDistance(int trigPin, int echoPin) {
+// ---------------- ENTRY GATE (UPDATED) ----------------
+void handleEntryGate(){
 
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
+  static bool gateOpen = false;
+  static unsigned long carLeftTime = 0;
 
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
+  int d = getDistance(ENTRY_TRIG,ENTRY_ECHO);
 
-  long duration = pulseIn(echoPin, HIGH, 30000);
-
-  if (duration == 0) return 400;
-
-  int distance = duration * 0.034 / 2;
-  if (distance < 0 || distance > 400) return 400;
-
-  return distance;
-}
-
-// ---------------- SLOT LOGIC ----------------
-void updateSlot(int distance, int &counter, bool &occupied) {
-
-  if (distance < threshold) {
-    if (counter < confirmCount) counter++;
-  } else {
-    if (counter > 0) counter--;
+  // Car detected → open gate
+  if(d < gateThreshold){
+    entryServo.write(90);
+    gateOpen = true;
+    carLeftTime = 0;
   }
+  else{
+    // Car left and gate is open
+    if(gateOpen){
 
-  occupied = (counter >= confirmCount);
-}
+      if(carLeftTime == 0){
+        carLeftTime = millis();
+      }
 
-// ---------------- LCD ----------------
-void displayLCD() {
-
-  int freeSlots = 0;
-  if (!slot1Occupied) freeSlots++;
-  if (!slot2Occupied) freeSlots++;
-  if (!slot3Occupied) freeSlots++;
-
-  lcd.clear();
-
-  if (freeSlots == 0) {
-    lcd.setCursor(0,0);
-    lcd.print(" PARKING FULL ");
-    lcd.setCursor(0,1);
-    lcd.print(" NO SLOT FREE ");
-  } 
-  else {
-    lcd.setCursor(0,0);
-    lcd.print("Free Slots: ");
-    lcd.print(freeSlots);
-
-    lcd.setCursor(0,1);
-    lcd.print("S1:");
-    lcd.print(slot1Occupied ? "F " : "E ");
-    lcd.print("S2:");
-    lcd.print(slot2Occupied ? "F " : "E ");
-    lcd.print("S3:");
-    lcd.print(slot3Occupied ? "F" : "E");
+      if(millis() - carLeftTime >= 5000){
+        entryServo.write(0);
+        gateOpen = false;
+        carLeftTime = 0;
+      }
+    }
   }
 }
 
-// ---------------- TIME ----------------
-String getCurrentTime() {
+// ---------------- EXIT GATE (FIXED) ----------------
+void handleExitGate(){
 
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo))
-    return "0000-00-00 00:00:00";
+  static bool processingExit = false;
 
-  char buffer[25];
-  strftime(buffer, sizeof(buffer),
-           "%Y-%m-%d %H:%M:%S", &timeinfo);
+  int d = getDistance(EXIT_TRIG,EXIT_ECHO);
 
-  return String(buffer);
+  if(d < gateThreshold && lastExitedSlot != 0 && !processingExit){
+
+    processingExit = true;   // Prevent multiple trigger
+
+    // Show charge
+    exitLcd.clear();
+    exitLcd.setCursor(0,0);
+    exitLcd.print("Charge: Rs ");
+    exitLcd.print(lastCharge);
+
+    delay(10000);   // Wait 10 sec
+
+    // Open gate
+    exitServo.write(90);
+    delay(500);   // small settle delay
+
+    // Show THANK YOU while gate open
+    exitLcd.clear();
+    exitLcd.setCursor(3,0);
+    exitLcd.print("THANK YOU");
+
+    delay(4000);   // Gate open time
+
+    // Close gate
+    exitServo.write(0);
+    delay(500);
+
+    exitLcd.clear();
+
+    sendToServer(lastExitedSlot,0,0,lastDuration,lastCharge);
+
+    lastExitedSlot = 0;
+    processingExit = false;
+  }
 }
 
-String getTimeFromMillis(unsigned long pastMillis) {
+// ---------------- SLOT UPDATE ----------------
+void updateSlots(){
 
-  struct tm timeinfo;
-  getLocalTime(&timeinfo);
+  int d1=getDistance(TRIG1,ECHO1);
+  int d2=getDistance(TRIG2,ECHO2);
+  int d3=getDistance(TRIG3,ECHO3);
 
-  time_t now = mktime(&timeinfo);
-  time_t entryTime = now - ((millis() - pastMillis) / 1000);
+  slot1 = d1 < slotThreshold;
+  slot2 = d2 < slotThreshold;
+  slot3 = d3 < slotThreshold;
 
-  struct tm* entryTm = localtime(&entryTime);
+  if(!slot1 && prev1){
+    lastExitedSlot = 1;
+    lastDuration = (millis() - entryTime1)/1000;
+    lastCharge = lastDuration;
+  }
+  else if(!slot2 && prev2){
+    lastExitedSlot = 2;
+    lastDuration = (millis() - entryTime2)/1000;
+    lastCharge = lastDuration;
+  }
+  else if(!slot3 && prev3){
+    lastExitedSlot = 3;
+    lastDuration = (millis() - entryTime3)/1000;
+    lastCharge = lastDuration;
+  }
 
-  char buffer[25];
-  strftime(buffer, sizeof(buffer),
-           "%Y-%m-%d %H:%M:%S", entryTm);
+  if(slot1 && !prev1) entryTime1=millis();
+  if(slot2 && !prev2) entryTime2=millis();
+  if(slot3 && !prev3) entryTime3=millis();
 
-  return String(buffer);
+  prev1=slot1;
+  prev2=slot2;
+  prev3=slot3;
 }
 
-// ---------------- SEND TO SERVER ----------------
+// ---------------- ENTRY LCD ----------------
+void displayEntryLCD(){
+
+  int available = (!slot1)+(!slot2)+(!slot3);
+
+  if(available == 0){
+    entryLcd.clear();
+    entryLcd.setCursor(3,1);
+    entryLcd.print("PARKING FULL");
+    return;
+  }
+
+  entryLcd.clear();
+
+  entryLcd.setCursor(0,0);
+  entryLcd.print("PARKING SYSTEM");
+
+  entryLcd.setCursor(0,1);
+  entryLcd.print("Available: ");
+  entryLcd.print(available);
+
+  entryLcd.setCursor(0,2);
+  entryLcd.print("S1:");
+  entryLcd.print(slot1?"FULL ":"EMPTY");
+
+  entryLcd.setCursor(0,3);
+  entryLcd.print("S2:");
+  entryLcd.print(slot2?"FULL ":"EMPTY");
+  entryLcd.print(" S3:");
+  entryLcd.print(slot3?"FULL":"EMPTY");
+}
+
+// ---------------- DISTANCE ----------------
+int getDistance(int t,int e){
+  digitalWrite(t,LOW); delayMicroseconds(2);
+  digitalWrite(t,HIGH); delayMicroseconds(10);
+  digitalWrite(t,LOW);
+  long duration=pulseIn(e,HIGH,30000);
+  if(duration<=0) return 400;
+  return duration*0.034/2;
+}
+
+// ---------------- SERVER ----------------
 void sendToServer(int slot,
-                  String entryTime,
-                  String exitTime,
-                  unsigned long duration) {
+                  unsigned long entryTimeMillis,
+                  unsigned long exitTimeMillis,
+                  unsigned long duration,
+                  unsigned long charge){
 
-  if (WiFi.status() == WL_CONNECTED) {
+  if(WiFi.status()==WL_CONNECTED){
+
+    struct tm timeinfo;
+    time_t now;
+    time(&now);
+
+    char exitString[30];
+    char entryString[30];
+
+    localtime_r(&now, &timeinfo);
+    strftime(exitString, sizeof(exitString), "%Y-%m-%d %H:%M:%S", &timeinfo);
+
+    time_t entryReal = now - duration;
+    struct tm entryInfo;
+    localtime_r(&entryReal, &entryInfo);
+    strftime(entryString, sizeof(entryString), "%Y-%m-%d %H:%M:%S", &entryInfo);
 
     HTTPClient http;
-    http.setTimeout(3000);   // 🔥 Prevent freezing
-
     http.begin(serverURL);
-    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Content-Type","application/json");
 
-    String jsonData = "{";
-    jsonData += "\"slot\":" + String(slot) + ",";
-    jsonData += "\"entry_time\":\"" + entryTime + "\",";
-    jsonData += "\"exit_time\":\"" + exitTime + "\",";
-    jsonData += "\"duration_seconds\":" + String(duration);
-    jsonData += "}";
+    String json="{";
+    json+="\"slot\":"+String(slot)+",";
+    json+="\"entry_time\":\""+String(entryString)+"\",";
+    json+="\"exit_time\":\""+String(exitString)+"\",";
+    json+="\"duration_sec\":"+String(duration)+",";
+    json+="\"charge\":"+String(charge);
+    json+="}";
 
-    Serial.println("Sending JSON:");
-    Serial.println(jsonData);
-
-    int response = http.POST(jsonData);
-
-    Serial.print("Server Response: ");
-    Serial.println(response);
-
+    http.POST(json);
     http.end();
   }
 }
