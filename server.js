@@ -6,36 +6,88 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-// 🔐 MongoDB Connection
+// ---------------- MONGODB CONNECTION ----------------
 mongoose.connect(
   "mongodb+srv://smitmaniya0401_db_user:um5c4UqNKaJ5LxwN@iotproject.z3toxsp.mongodb.net/smart_parking?retryWrites=true&w=majority"
 )
 .then(() => console.log("MongoDB Connected"))
 .catch(err => console.log(err));
 
-// Schema
+
+// ---------------- UPDATED SCHEMA ----------------
 const parkingSchema = new mongoose.Schema({
-  slot: Number,
-  entry_time: String,
-  exit_time: String,
-  duration_seconds: Number,
-  charge_rupees: Number   // (optional if ESP32 sends it)
+
+  slot: {
+    type: Number,
+    required: true
+  },
+
+  entry_time: {
+    type: Date,
+    required: true
+  },
+
+  exit_time: {
+    type: Date,
+    required: true
+  },
+
+  duration_seconds: {
+    type: Number,
+    required: true
+  },
+
+  charge_rupees: {
+    type: Number,
+    required: true
+  },
+
+  created_at: {
+    type: Date,
+    default: Date.now
+  }
+
 });
 
 const Parking = mongoose.model("parking_logs", parkingSchema);
 
-// ---------------- EXISTING POST API ----------------
+
+// ---------------- POST API ----------------
 app.post("/log", async (req, res) => {
+
   try {
-    const newLog = new Parking(req.body);
+
+    const { slot, entry_time, exit_time, duration_sec, charge } = req.body;
+
+    // Convert to proper Date format
+    const entryDate = new Date(entry_time);
+    const exitDate = new Date(exit_time);
+
+    // If ESP32 doesn't send charge, calculate ₹1/sec
+    const calculatedCharge = charge ? charge : duration_sec;
+
+    const newLog = new Parking({
+      slot: slot,
+      entry_time: entryDate,
+      exit_time: exitDate,
+      duration_seconds: duration_sec,
+      charge_rupees: calculatedCharge
+    });
+
     await newLog.save();
-    res.status(200).json({ message: "Saved" });
+
+    res.status(200).json({ message: "Data Saved Successfully" });
+
   } catch (error) {
-    res.status(500).json({ message: "Error" });
+
+    console.log(error);
+    res.status(500).json({ message: "Error Saving Data" });
+
   }
 });
 
-// ---------------- NEW TABLE VIEW ROUTE ----------------
+
+// ---------------- DASHBOARD ----------------
 app.get("/dashboard", async (req, res) => {
 
   const logs = await Parking.find().sort({ _id: -1 });
@@ -55,16 +107,15 @@ app.get("/dashboard", async (req, res) => {
 
   logs.forEach(log => {
 
-    let charge = log.charge_rupees || log.duration_seconds; // ₹1 per sec if not stored
-    totalCollection += charge;
+    totalCollection += log.charge_rupees;
 
     html += `
     <tr>
       <td>${log.slot}</td>
-      <td>${log.entry_time}</td>
-      <td>${log.exit_time}</td>
+      <td>${log.entry_time.toLocaleString()}</td>
+      <td>${log.exit_time.toLocaleString()}</td>
       <td>${log.duration_seconds}</td>
-      <td>${charge}</td>
+      <td>${log.charge_rupees}</td>
     </tr>`;
   });
 
@@ -76,10 +127,12 @@ app.get("/dashboard", async (req, res) => {
   res.send(html);
 });
 
+
 // ---------------- ROOT ROUTE ----------------
 app.get("/", (req, res) => {
   res.send("Smart Parking Server Running");
 });
+
 
 app.listen(3000, () => {
   console.log("Server running on port 3000");
