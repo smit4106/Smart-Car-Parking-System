@@ -8,7 +8,6 @@
 // ---------------- WIFI ----------------
 const char* ssid = "Galaxy M34 5G";
 const char* password = "04012026";
-
 const char* serverURL = "https://smart-car-parking-system-0f2w.onrender.com/log";
 
 // ---------------- NTP TIME ----------------
@@ -44,8 +43,8 @@ Servo exitServo;
 #define EXIT_TRIG 4
 #define EXIT_ECHO 2
 
-const int slotThreshold = 10;
-const int gateThreshold = 15;
+const int slotThreshold = 5;
+const int gateThreshold = 5;
 
 bool slot1=false, slot2=false, slot3=false;
 bool prev1=false, prev2=false, prev3=false;
@@ -89,37 +88,43 @@ void setup() {
 
 void loop() {
 
+  updateSlots();          // 🔴 Update slots first
   handleEntryGate();
-  updateSlots();
   handleExitGate();
   displayEntryLCD();
 
   delay(300);
 }
 
-// ---------------- ENTRY GATE (UPDATED) ----------------
+// ---------------- ENTRY GATE ----------------
 void handleEntryGate(){
 
   static bool gateOpen = false;
   static unsigned long carLeftTime = 0;
 
+  int available = (!slot1) + (!slot2) + (!slot3);
   int d = getDistance(ENTRY_TRIG,ENTRY_ECHO);
 
-  // Car detected → open gate
+  // 🚫 If parking full → keep gate closed
+  if(available == 0){
+    entryServo.write(0);
+    gateOpen = false;
+    return;
+  }
+
+  // ✅ Normal operation if space available
   if(d < gateThreshold){
     entryServo.write(90);
     gateOpen = true;
     carLeftTime = 0;
   }
   else{
-    // Car left and gate is open
     if(gateOpen){
-
       if(carLeftTime == 0){
         carLeftTime = millis();
       }
 
-      if(millis() - carLeftTime >= 5000){
+      if(millis() - carLeftTime >= 3000){
         entryServo.write(0);
         gateOpen = false;
         carLeftTime = 0;
@@ -128,7 +133,7 @@ void handleEntryGate(){
   }
 }
 
-// ---------------- EXIT GATE (FIXED) ----------------
+// ---------------- EXIT GATE ----------------
 void handleExitGate(){
 
   static bool processingExit = false;
@@ -137,28 +142,24 @@ void handleExitGate(){
 
   if(d < gateThreshold && lastExitedSlot != 0 && !processingExit){
 
-    processingExit = true;   // Prevent multiple trigger
+    processingExit = true;
 
-    // Show charge
     exitLcd.clear();
     exitLcd.setCursor(0,0);
     exitLcd.print("Charge: Rs ");
     exitLcd.print(lastCharge);
 
-    delay(10000);   // Wait 10 sec
+    delay(5000);
 
-    // Open gate
     exitServo.write(90);
-    delay(500);   // small settle delay
+    delay(500);
 
-    // Show THANK YOU while gate open
     exitLcd.clear();
     exitLcd.setCursor(3,0);
     exitLcd.print("THANK YOU");
 
-    delay(4000);   // Gate open time
+    delay(4000);
 
-    // Close gate
     exitServo.write(0);
     delay(500);
 
@@ -212,14 +213,13 @@ void displayEntryLCD(){
 
   int available = (!slot1)+(!slot2)+(!slot3);
 
+  entryLcd.clear();
+
   if(available == 0){
-    entryLcd.clear();
     entryLcd.setCursor(3,1);
     entryLcd.print("PARKING FULL");
     return;
   }
-
-  entryLcd.clear();
 
   entryLcd.setCursor(0,0);
   entryLcd.print("PARKING SYSTEM");
@@ -239,7 +239,7 @@ void displayEntryLCD(){
   entryLcd.print(slot3?"FULL":"EMPTY");
 }
 
-// ---------------- DISTANCE ----------------
+// ---------------- DISTANCE FUNCTION ----------------
 int getDistance(int t,int e){
   digitalWrite(t,LOW); delayMicroseconds(2);
   digitalWrite(t,HIGH); delayMicroseconds(10);
