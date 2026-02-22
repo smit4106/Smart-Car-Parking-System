@@ -6,9 +6,9 @@
 #include "time.h"
 
 // ---------------- WIFI ----------------
-const char* ssid = "Galaxy M34 5G";
-const char* password = "04012026";
-const char* serverURL = "https://smart-car-parking-system-0f2w.onrender.com/log";
+const char* ssid = "Wifi-Name";
+const char* password = "Password";
+const char* serverURL = "URL of cloud";
 
 // ---------------- NTP TIME ----------------
 const char* ntpServer = "pool.ntp.org";
